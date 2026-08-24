@@ -1,0 +1,30 @@
+{
+  "name": "pelucabot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Matthewcin/PelucaBot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Matthewcin/PelucaBot/issues"
+  },
+  "homepage": "https://github.com/Matthewcin/PelucaBot#readme",
+  "dependencies": {
+    "@google/genai": "^2.18.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.6.0",
+    "pg": "^8.23.0",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
