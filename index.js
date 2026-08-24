@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
 import { GoogleGenAI } from '@google/genai';
 import pg from 'pg';
 import pino from 'pino';
@@ -16,6 +16,69 @@ const pool = new Pool({
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const userSessions = new Map();
 let globalSock = null;
+
+async function usePostgresAuthState(dbPool) {
+    await dbPool.query(`CREATE TABLE IF NOT EXISTS auth_state (id VARCHAR(255) PRIMARY KEY, data TEXT NOT NULL)`);
+
+    const readData = async (id) => {
+        const res = await dbPool.query('SELECT data FROM auth_state WHERE id = $1', [id]);
+        if (res.rowCount > 0) {
+            return JSON.parse(res.rows[0].data, BufferJSON.reviver);
+        }
+        return null;
+    };
+
+    const writeData = async (id, data) => {
+        const str = JSON.stringify(data, BufferJSON.replacer);
+        await dbPool.query(
+            'INSERT INTO auth_state (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data',
+            [id, str]
+        );
+    };
+
+    const removeData = async (id) => {
+        await dbPool.query('DELETE FROM auth_state WHERE id = $1', [id]);
+    };
+
+    const creds = (await readData('creds')) || initAuthCreds();
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(
+                        ids.map(async (id) => {
+                            let value = await readData(`${type}-${id}`);
+                            if (type === 'app-state-sync-key' && value) {
+                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                            }
+                            data[id] = value;
+                        })
+                    );
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            if (value) {
+                                tasks.push(writeData(key, value));
+                            } else {
+                                tasks.push(removeData(key));
+                            }
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: () => writeData('creds', creds)
+    };
+}
 
 async function initUser(phone) {
     await pool.query(
@@ -275,7 +338,7 @@ cron.schedule('0 22 * * *', async () => {
 });
 
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const { state, saveCreds } = await usePostgresAuthState(pool);
 
     const sock = makeWASocket({
         auth: state,
