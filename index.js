@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import makeWASocket, { DisconnectReason, initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import pg from 'pg';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
@@ -175,9 +175,15 @@ Tu alumna/cliente es una chica colombiana que quiere ordenar su dinero.
 
 Reglas de respuesta:
 1. Usá modismos de Javier Milei, pero EXPLICA TODO DE FORMA MUY SIMPLE y humana.
-2. Si la 'Plata libre' is menor a 0: RECHAZÁ el gasto. Decile cuánta plata falta en su liquidez mensual.
+2. Si la 'Plata libre' es menor a 0: RECHAZÁ el gasto. Decile cuánta plata falta en su liquidez mensual.
 3. Si la 'Plata libre' es positiva, dale permiso. Si tiene metas en sus DATOS REALES, decile que esa plata libre la acerca a sus sueños.
-4. Sé breve, divertido y directo.
+4. Analiza si en el texto del usuario hay una intención clara de registrar algo (una deuda, un gasto fijo, una suscripción, una meta o su plata disponible). Si detectás algo para registrar, completá los campos correspondientes en la respuesta JSON. Si no hay nada para registrar, dejalos vacíos o null.
+
+FORMATO DE WHATSAPP:
+- Para negrita usá un solo asterisco: *texto*
+- NO uses doble asterisco: **texto**
+- Para cursiva usá guiones bajos: _texto_
+- No uses Markdown de código ni encabezados.
 `;
 
     const promptContext = `
@@ -197,10 +203,38 @@ CONSULTA: "${userQuery}"
     const response = await ai.models.generateContent({
         model: 'gemini-3.6-flash',
         contents: promptContext,
-        config: { systemInstruction }
+        config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    reply: { type: Type.STRING, description: "La respuesta con tono de Javier Milei y consejos financieros." },
+                    intent: { 
+                        type: Type.STRING, 
+                        enum: ["NONE", "DEBT", "EXPENSE", "BALANCE", "GOAL"],
+                        description: "Detecta si el usuario quiere anotar una deuda, gasto, balance o meta."
+                    },
+                    data: {
+                        type: Type.OBJECT,
+                        properties: {
+                            name: { type: Type.STRING },
+                            amount: { type: Type.NUMBER },
+                            monthlyInstallment: { type: Type.NUMBER },
+                            dueDate: { type: Type.STRING }
+                        }
+                    }
+                },
+                required: ["reply", "intent"]
+            }
+        }
     });
 
-    return response.text;
+    try {
+        return JSON.parse(response.text);
+    } catch (e) {
+        return { reply: response.text, intent: "NONE" };
+    }
 }
 
 async function askEmpatheticAI() {
@@ -220,7 +254,7 @@ Sé muy tierno, breve y dale paz mental. No actúes como Javier Milei.
     return response.text;
 }
 
-async function sendAiWithLoading(sock, jid, userQuery, state) {
+async function sendAiWithLoading(sock, jid, userQuery, state, phone) {
     const frames = [
         '🦁 *Revisando tus números...*',
         '🦁 *Calculando cuánta plata libre queda...*',
@@ -243,10 +277,18 @@ async function sendAiWithLoading(sock, jid, userQuery, state) {
     }, 600);
 
     try {
-        const advice = await askMileiAI(userQuery, state);
+        const result = await askMileiAI(userQuery, state);
         clearInterval(interval);
+
+        let finalResponse = result.reply;
+
+        if (result.intent && result.intent !== "NONE") {
+            userSessions.set(phone, { step: 'PENDING_AI_ACTION', intent: result.intent, data: result.data });
+            finalResponse += `\n\n💡 *¡Oí una intención de registro!*\nDetecté que querés anotar un/a *${result.intent}* (Monto: $${result.data?.amount || 'No especificado'}).\n¿Querés que lo guarde automáticamente en tu base de datos? Respondé *SÍ* o *NO*.`;
+        }
+
         await sock.sendMessage(jid, {
-            text: `${advice}\n\n${getMainMenu()}`,
+            text: `${finalResponse}\n\n${getMainMenu()}`,
             edit: initialMsg.key
         });
     } catch (err) {
@@ -429,10 +471,45 @@ async function startBot() {
                 return;
             }
 
+            if (session.step === 'PENDING_AI_ACTION') {
+                const responseText = text.toLowerCase();
+                if (responseText === 'si' || responseText === 'sí') {
+                    const intent = session.intent;
+                    const d = session.data || {};
+
+                    if (intent === 'DEBT') {
+                        await pool.query(
+                            `INSERT INTO debts (phone_number, name, total_amount, monthly_installment, interest_rate, due_date) VALUES ($1, $2, $3, $4, $5, $6)`,
+                            [phone, d.name || 'Deuda IA', d.amount || 0, d.monthlyInstallment || 0, 0, d.dueDate || '2026-12-31']
+                        );
+                    } else if (intent === 'EXPENSE') {
+                        await pool.query(
+                            `INSERT INTO expenses (phone_number, name, amount, due_date) VALUES ($1, $2, $3, $4)`,
+                            [phone, d.name || 'Gasto IA', d.amount || 0, d.dueDate || '2026-12-31']
+                        );
+                    } else if (intent === 'BALANCE') {
+                        await pool.query(`UPDATE users SET available_balance = $1 WHERE phone_number = $2`, [d.amount || 0, phone]);
+                    } else if (intent === 'GOAL') {
+                        await pool.query(
+                            `INSERT INTO goals (phone_number, name, target_amount) VALUES ($1, $2, $3)`,
+                            [phone, d.name || 'Meta IA', d.amount || 0]
+                        );
+                    }
+
+                    userSessions.set(phone, { step: 'IDLE' });
+                    await sock.sendMessage(sender, { text: `✅ ¡Guardado con éxito en la base de datos!\n\n${getMainMenu()}` });
+                    return;
+                } else {
+                    userSessions.set(phone, { step: 'IDLE' });
+                    await sock.sendMessage(sender, { text: `❌ Operación cancelada.\n\n${getMainMenu()}` });
+                    return;
+                }
+            }
+
             if (text.toLowerCase().startsWith('ia ')) {
                 const query = text.slice(3).trim();
                 const currState = await getFinancialState(phone);
-                await sendAiWithLoading(sock, sender, query, currState);
+                await sendAiWithLoading(sock, sender, query, currState, phone);
                 return;
             }
 
@@ -617,7 +694,15 @@ async function startBot() {
             if (session.step === 'WAITING_AI_QUERY') {
                 const currState = await getFinancialState(phone);
                 userSessions.set(phone, { step: 'IDLE' });
-                await sendAiWithLoading(sock, sender, text, currState);
+                const result = await askMileiAI(text, currState);
+                let finalResponse = result.reply;
+
+                if (result.intent && result.intent !== "NONE") {
+                    userSessions.set(phone, { step: 'PENDING_AI_ACTION', intent: result.intent, data: result.data });
+                    finalResponse += `\n\n💡 *¡Oí una intención de registro!*\nDetecté que querés anotar un/a *${result.intent}* (Monto: $${result.data?.amount || 'No especificado'}).\n¿Querés que lo guarde automáticamente en tu base de datos? Respondé *SÍ* o *NO*.`;
+                }
+
+                await sock.sendMessage(sender, { text: `${finalResponse}\n\n${getMainMenu()}` });
                 return;
             }
 
