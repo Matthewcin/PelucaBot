@@ -31,6 +31,7 @@ async function usePostgresAuthState(dbPool) {
             if (res.rows.length === 0) return null;
             return JSON.parse(res.rows[0].value, BufferJSON.reviver);
         } catch (error) {
+            console.error(error);
             return null;
         }
     };
@@ -43,13 +44,17 @@ async function usePostgresAuthState(dbPool) {
                 VALUES ($1, $2)
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
             `, [key, jsonString]);
-        } catch (error) {}
+        } catch (error) {
+            console.error(error);
+        }
     };
 
     const removeData = async (key) => {
         try {
             await dbPool.query('DELETE FROM whatsapp_sessions WHERE key = $1', [key]);
-        } catch (error) {}
+        } catch (error) {
+            console.error(error);
+        }
     };
 
     const creds = await readData('creds') || initAuthCreds();
@@ -150,7 +155,7 @@ async function getFinancialState(phone) {
 
 function getMainMenu() {
     return `*ORGANIZADOR DE DINERO* 🦁📊\n\n` +
-           `Elegí una opción enviando el número:\n\n` +
+           `Elegí una opción enviando el número (o escribí *ia* seguido de tu duda para consultar libremente):\n\n` +
            `1️⃣ *Anotar cuánta plata tengo ahora*\n` +
            `2️⃣ *Anotar una deuda (con fecha límite)*\n` +
            `3️⃣ *Anotar un gasto fijo (luz, agua, etc.)*\n` +
@@ -170,7 +175,7 @@ Tu alumna/cliente es una chica colombiana que quiere ordenar su dinero.
 
 Reglas de respuesta:
 1. Usá modismos de Javier Milei, pero EXPLICA TODO DE FORMA MUY SIMPLE y humana.
-2. Si la 'Plata libre' es menor a 0: RECHAZÁ el gasto. Decile cuánta plata falta en su liquidez mensual.
+2. Si la 'Plata libre' is menor a 0: RECHAZÁ el gasto. Decile cuánta plata falta en su liquidez mensual.
 3. Si la 'Plata libre' es positiva, dale permiso. Si tiene metas en sus DATOS REALES, decile que esa plata libre la acerca a sus sueños.
 4. Sé breve, divertido y directo.
 `;
@@ -190,7 +195,7 @@ CONSULTA: "${userQuery}"
 `;
 
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: promptContext,
         config: { systemInstruction }
     });
@@ -207,7 +212,7 @@ Sé muy tierno, breve y dale paz mental. No actúes como Javier Milei.
 `;
 
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: "Tengo mucha ansiedad por las deudas y la plata, me siento mal.",
         config: { systemInstruction }
     });
@@ -246,8 +251,9 @@ async function sendAiWithLoading(sock, jid, userQuery, state) {
         });
     } catch (err) {
         clearInterval(interval);
+        console.error(err);
         await sock.sendMessage(jid, {
-            text: '❌ Ocurrió un error leyendo los datos.',
+            text: '❌ Ocurrió un error consultando a la IA.',
             edit: initialMsg.key
         });
     }
@@ -282,6 +288,7 @@ async function sendPanicAiWithLoading(sock, jid) {
         });
     } catch (err) {
         clearInterval(interval);
+        console.error(err);
     }
 }
 
@@ -297,8 +304,22 @@ async function sendPositiveFeedback(sock, jid, captionText) {
             await sock.sendMessage(jid, { text: captionText });
         }
     } catch (error) {
+        console.error(error);
         await sock.sendMessage(jid, { text: captionText });
     }
+}
+
+function getMessageText(msgContent) {
+    if (!msgContent) return '';
+    if (msgContent.conversation) return msgContent.conversation;
+    if (msgContent.extendedTextMessage?.text) return msgContent.extendedTextMessage.text;
+    if (msgContent.ephemeralMessage?.message?.conversation) return msgContent.ephemeralMessage.message.conversation;
+    if (msgContent.ephemeralMessage?.message?.extendedTextMessage?.text) return msgContent.ephemeralMessage.message.extendedTextMessage.text;
+    if (msgContent.viewOnceMessage?.message?.conversation) return msgContent.viewOnceMessage.message.conversation;
+    if (msgContent.viewOnceMessage?.message?.extendedTextMessage?.text) return msgContent.viewOnceMessage.message.extendedTextMessage.text;
+    if (msgContent.viewOnceMessageV2?.message?.conversation) return msgContent.viewOnceMessageV2.message.conversation;
+    if (msgContent.viewOnceMessageV2?.message?.extendedTextMessage?.text) return msgContent.viewOnceMessageV2.message.extendedTextMessage.text;
+    return '';
 }
 
 cron.schedule('0 10 * * *', async () => {
@@ -333,7 +354,9 @@ cron.schedule('0 10 * * *', async () => {
                 });
             }
         }
-    } catch (error) {}
+    } catch (error) {
+        console.error(error);
+    }
 });
 
 cron.schedule('0 22 * * *', async () => {
@@ -347,7 +370,9 @@ cron.schedule('0 22 * * *', async () => {
                 text: `🌙 ¡Buenas noches!\n\nDescansá tranquila, los números están guardados y bajo control. Mañana es un nuevo día para seguir avanzando hacia tus metas y sueños. ¡Tu paz mental vale más que cualquier número! ✨` 
             });
         }
-    } catch (error) {}
+    } catch (error) {
+        console.error(error);
+    }
 });
 
 async function startBot() {
@@ -356,7 +381,7 @@ async function startBot() {
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: true
+        printQRInTerminal: false
     });
 
     globalSock = sock;
@@ -365,6 +390,11 @@ async function startBot() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) qrcode.generate(qr, { small: true });
+        
+        if (connection === 'open') {
+            console.log('✅ ¡Conectado y listo!');
+        }
+        
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
@@ -377,12 +407,17 @@ async function startBot() {
         if (!msg.message || msg.key.fromMe) return;
         if (msg.key.remoteJid.includes('@g.us')) return;
 
-        const sender = msg.key.remoteJid;
-        const phone = sender.replace('@s.whatsapp.net', '');
-        
-        if (phone !== process.env.ALLOWED_PHONE) return;
+        try {
+            await sock.readMessages([msg.key]);
+        } catch (err) {}
 
-        const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+        const sender = msg.key.remoteJid;
+        const phone = sender.split('@')[0].split(':')[0];
+        
+        const allowedPhones = (process.env.ALLOWED_PHONE || '').split(',').map(p => p.trim());
+        if (!allowedPhones.includes(phone)) return;
+
+        const text = getMessageText(msg.message).trim();
         if (!text) return;
 
         const session = userSessions.get(phone) || { step: 'IDLE' };
@@ -394,31 +429,38 @@ async function startBot() {
                 return;
             }
 
+            if (text.toLowerCase().startsWith('ia ')) {
+                const query = text.slice(3).trim();
+                const currState = await getFinancialState(phone);
+                await sendAiWithLoading(sock, sender, query, currState);
+                return;
+            }
+
             if (session.step === 'IDLE') {
                 switch (text) {
                     case '1':
                         userSessions.set(phone, { step: 'WAITING_BALANCE' });
-                        await sock.sendMessage(sender, { text: '💵 Escribí cuánta plata tenés disponible ahora:' });
+                        await sock.sendMessage(sender, { text: '💵 Escribí cuánta plata tenés disponible ahora:\n\n_💡 Ejemplo: 1500000_' });
                         return;
 
                     case '2':
                         userSessions.set(phone, { step: 'WAITING_DEBT' });
-                        await sock.sendMessage(sender, { text: '📝 Escribí tu deuda así:\n[Nombre] [Deuda Total] [Cuota que pagás por mes] [Interés %] [AAAA-MM-DD]\nEjemplo: `Tarjeta 1500000 50000 12 2026-03-10`' });
+                        await sock.sendMessage(sender, { text: '📝 Escribí tu deuda así:\n[Nombre] [Deuda Total] [Cuota que pagás por mes] [Interés %] [AAAA-MM-DD]\n\n_💡 Ejemplo: Tarjeta 1500000 50000 12 2026-03-10_' });
                         return;
 
                     case '3':
                         userSessions.set(phone, { step: 'WAITING_EXPENSE' });
-                        await sock.sendMessage(sender, { text: '💡 Escribí tu gasto fijo así:\n[Nombre] [Plata] [AAAA-MM-DD]\nEjemplo: `Luz 45000 2026-03-15`' });
+                        await sock.sendMessage(sender, { text: '💡 Escribí tu gasto fijo así:\n[Nombre] [Plata] [AAAA-MM-DD]\n\n_💡 Ejemplo: Luz 45000 2026-03-15_' });
                         return;
 
                     case '4':
                         userSessions.set(phone, { step: 'WAITING_SUB' });
-                        await sock.sendMessage(sender, { text: '🔄 Escribí tu suscripción así:\n[Nombre] [Plata] [Día del mes]\nEjemplo: `Netflix 25000 15`' });
+                        await sock.sendMessage(sender, { text: '🔄 Escribí tu suscripción así:\n[Nombre] [Plata] [Día del mes]\n\n_💡 Ejemplo: Netflix 25000 15_' });
                         return;
 
                     case '5':
                         userSessions.set(phone, { step: 'WAITING_GOAL' });
-                        await sock.sendMessage(sender, { text: '🌟 Escribí tu meta así:\n[Nombre del sueño] [Plata necesaria]\nEjemplo: `Viaje a la playa 150000`' });
+                        await sock.sendMessage(sender, { text: '🌟 Escribí tu meta así:\n[Nombre del sueño] [Plata necesaria]\n\n_💡 Ejemplo: Viaje a la playa 150000_' });
                         return;
 
                     case '6':
@@ -444,7 +486,7 @@ async function startBot() {
                         }
 
                         userSessions.set(phone, { step: 'WAITING_PAY_SELECTION', items: pendingItems });
-                        await sock.sendMessage(sender, { text: `${list}\nRespondé con el número de lo que ya pagaste.` });
+                        await sock.sendMessage(sender, { text: `${list}\nRespondé con el número de lo que ya pagaste.\n\n_💡 Ejemplo: 1_` });
                         return;
 
                     case '7':
@@ -469,7 +511,7 @@ async function startBot() {
 
                     case '8':
                         userSessions.set(phone, { step: 'WAITING_AI_QUERY' });
-                        await sock.sendMessage(sender, { text: '🦁 ¿Qué querés comprar o qué duda tenés con tu plata?' });
+                        await sock.sendMessage(sender, { text: '🦁 ¿Qué querés comprar o qué duda tenés con tu plata?\n\n_💡 Ejemplo: ¿Me alcanza para comprar una campera de 80000?_' });
                         return;
 
                     case '9':
@@ -478,8 +520,7 @@ async function startBot() {
                         return;
 
                     default:
-                        const stateNow = await getFinancialState(phone);
-                        await sendAiWithLoading(sock, sender, text, stateNow);
+                        await sock.sendMessage(sender, { text: `❓ No reconocí esa opción.\n\n${getMainMenu()}` });
                         return;
                 }
             }
@@ -581,6 +622,7 @@ async function startBot() {
             }
 
         } catch (error) {
+            console.error('Error in message handler:', error);
             await sock.sendMessage(sender, { text: 'Ups, algo salió mal. Escribí 0 para volver al menú.' });
         }
     });
