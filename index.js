@@ -4,7 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import pg from 'pg';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
-import http from 'http';
+import express from 'express';
 import cron from 'node-cron';
 
 const { Pool } = pg;
@@ -18,29 +18,41 @@ const userSessions = new Map();
 let globalSock = null;
 
 async function usePostgresAuthState(dbPool) {
-    await dbPool.query(`CREATE TABLE IF NOT EXISTS auth_state (id VARCHAR(255) PRIMARY KEY, data TEXT NOT NULL)`);
+    await dbPool.query(`
+        CREATE TABLE IF NOT EXISTS whatsapp_sessions (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    `);
 
-    const readData = async (id) => {
-        const res = await dbPool.query('SELECT data FROM auth_state WHERE id = $1', [id]);
-        if (res.rowCount > 0) {
-            return JSON.parse(res.rows[0].data, BufferJSON.reviver);
+    const readData = async (key) => {
+        try {
+            const res = await dbPool.query('SELECT value FROM whatsapp_sessions WHERE key = $1', [key]);
+            if (res.rows.length === 0) return null;
+            return JSON.parse(res.rows[0].value, BufferJSON.reviver);
+        } catch (error) {
+            return null;
         }
-        return null;
     };
 
-    const writeData = async (id, data) => {
-        const str = JSON.stringify(data, BufferJSON.replacer);
-        await dbPool.query(
-            'INSERT INTO auth_state (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data',
-            [id, str]
-        );
+    const writeData = async (data, key) => {
+        try {
+            const jsonString = JSON.stringify(data, BufferJSON.replacer);
+            await dbPool.query(`
+                INSERT INTO whatsapp_sessions (key, value)
+                VALUES ($1, $2)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            `, [key, jsonString]);
+        } catch (error) {}
     };
 
-    const removeData = async (id) => {
-        await dbPool.query('DELETE FROM auth_state WHERE id = $1', [id]);
+    const removeData = async (key) => {
+        try {
+            await dbPool.query('DELETE FROM whatsapp_sessions WHERE key = $1', [key]);
+        } catch (error) {}
     };
 
-    const creds = (await readData('creds')) || initAuthCreds();
+    const creds = await readData('creds') || initAuthCreds();
 
     return {
         state: {
@@ -48,25 +60,24 @@ async function usePostgresAuthState(dbPool) {
             keys: {
                 get: async (type, ids) => {
                     const data = {};
-                    await Promise.all(
-                        ids.map(async (id) => {
-                            let value = await readData(`${type}-${id}`);
-                            if (type === 'app-state-sync-key' && value) {
-                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                            }
-                            data[id] = value;
-                        })
-                    );
+                    for (const id of ids) {
+                        const key = `${type}-${id}`;
+                        let value = await readData(key);
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }
                     return data;
                 },
                 set: async (data) => {
                     const tasks = [];
-                    for (const category in data) {
-                        for (const id in data[category]) {
+                    for (const category of Object.keys(data)) {
+                        for (const id of Object.keys(data[category])) {
                             const value = data[category][id];
                             const key = `${category}-${id}`;
                             if (value) {
-                                tasks.push(writeData(key, value));
+                                tasks.push(writeData(value, key));
                             } else {
                                 tasks.push(removeData(key));
                             }
@@ -76,7 +87,9 @@ async function usePostgresAuthState(dbPool) {
                 }
             }
         },
-        saveCreds: () => writeData('creds', creds)
+        saveCreds: () => {
+            return writeData(creds, 'creds');
+        }
     };
 }
 
@@ -343,7 +356,7 @@ async function startBot() {
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false
+        printQRInTerminal: true
     });
 
     globalSock = sock;
@@ -353,7 +366,7 @@ async function startBot() {
         const { connection, lastDisconnect, qr } = update;
         if (qr) qrcode.generate(qr, { small: true });
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
         }
     });
@@ -573,12 +586,9 @@ async function startBot() {
     });
 }
 
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot running');
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+const app = express();
+const port = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Bot Activo'));
+app.listen(port, () => {
     startBot();
 });
